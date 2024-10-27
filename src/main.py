@@ -5,87 +5,89 @@ import tqdm
 import torch
 import json
 
-class ChatDataset(Dataset):
-    def __init__(self, FilePath: str, Tokenizer):
-        self.Conversations = self.load_data(FilePath)
-        self.EncodedData = self.tokenize_data(Tokenizer)
+class Dataset(Dataset):
+    def __init__(self, file_path: str, tokenizer):
+        self.conversations = self.load_conversations(file_path)
+        self.encoded_data = self.encode_conversations(tokenizer)
 
-    def load_data(self, FilePath: str):
-        with open(FilePath, "r") as file:
-            Data = json.load(file)
+    def load_conversations(self, file_path: str):
+        with open(file_path, "r") as file:
+            data = json.load(file)
         
-        Conversations = []
-        for Item in Data:
-            for Dialog in Item['dialog']:
-                Conversations.append(Dialog['text'])
+        conversations = []
+        for item in data:
+            for dialog in item['dialog']:
+                conversations.append(dialog['text'])
         
-        return Conversations[:5000]
+        formatted_conversations = [
+            f"<startofstring> {conversations[i]} <bot>: {conversations[i + 1]} <endofstring>"
+            for i in range(len(conversations) - 1)
+        ][:5000]
+        
+        return formatted_conversations
 
-    def tokenize_data(self, Tokenizer):
-        TokenizedData = Tokenizer(
-            [f"<startofstring> {self.Conversations[i]} <bot>: {self.Conversations[i + 1]} <endofstring>"
-             for i in range(len(self.Conversations) - 1)],
+    def encode_conversations(self, tokenizer):
+        encoded_data = tokenizer(
+            self.conversations,
             max_length=40,
             truncation=True,
             padding="max_length",
             return_tensors="pt"
         )
         return {
-            'InputIds': TokenizedData['input_ids'],
-            'AttentionMask': TokenizedData['attention_mask']
+            'input_ids': encoded_data['input_ids'],
+            'attention_mask': encoded_data['attention_mask']
         }
 
     def __len__(self):
-        return len(self.Conversations) - 1
+        return len(self.conversations)
 
-    def __getitem__(self, Index):
-        return self.EncodedData['InputIds'][Index], self.EncodedData['AttentionMask'][Index]
+    def __getitem__(self, index):
+        return self.encoded_data['input_ids'][index], self.encoded_data['attention_mask'][index]
 
-def TrainModel(DatasetLoader, Model, Optimizer, NumEpochs=12):
-    for Epoch in tqdm.tqdm(range(NumEpochs)):
-        for InputIds, AttentionMask in DatasetLoader:
-            InputIds = InputIds.to(Device)
-            AttentionMask = AttentionMask.to(Device)
-            Optimizer.zero_grad()
-            Loss = Model(InputIds, attention_mask=AttentionMask, labels=InputIds).loss
-            Loss.backward()
-            Optimizer.step()
-        torch.save(Model.state_dict(), "model_state.pt")
-        print(GenerateResponse("hello how are you"))
+def train_model(data_loader, model, optimizer, num_epochs=12):
+    model.train()
+    for epoch in tqdm.tqdm(range(num_epochs)):
+        for input_ids, attention_mask in data_loader:
+            input_ids, attention_mask = input_ids.to(device), attention_mask.to(device)
+            optimizer.zero_grad()
+            loss = model(input_ids, attention_mask=attention_mask, labels=input_ids).loss
+            loss.backward()
+            optimizer.step()
+        torch.save(model.state_dict(), "model_state.pt")
+        print(generate_response("hello how are you"))
 
-def GenerateResponse(UserInput):
-    FormattedInput = f"<startofstring> {User Input} <bot>: "
-    TokenizedInput = Tokenizer(FormattedInput, return_tensors="pt")
-    InputIds = TokenizedInput["input_ids"].to(Device)
-    AttentionMask = TokenizedInput["attention_mask"].to(Device)
-    GeneratedOutput = Model.generate(InputIds, attention_mask=AttentionMask)
-    DecodedOutput = Tokenizer.decode(GeneratedOutput[0], skip_special_tokens=True)
-    return DecodedOutput
+def generate_response(user_input):
+    formatted_input = f"<startofstring> {user_input} <bot>: "
+    tokenized_input = tokenizer(formatted_input, return_tensors="pt")
+    input_ids = tokenized_input["input_ids"].to(device)
+    attention_mask = tokenized_input["attention_mask"].to(device)
+    generated_output = model.generate(input_ids, attention_mask=attention_mask)
+    return tokenizer.decode(generated_output[0])
 
-Device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
-Tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-Tokenizer.add_special_tokens({
-    "pad_token": "<pad>", 
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+tokenizer.add_special_tokens({
+    "pad_token": "<pad>",
     "bos_token": "<startofstring>",
     "eos_token": "<endofstring>"
 })
-Tokenizer.add_tokens(["<bot>:"])
+tokenizer.add_tokens(["<bot>:"])
 
-Model = GPT2LMHeadModel.from_pretrained("gpt2")
-Model.resize_token_embeddings(len(Tokenizer))
-Model = Model.to(Device)
+model = GPT2LMHeadModel.from_pretrained("gpt2")
+model.resize_token_embeddings(len(tokenizer))
+model.to(device)
 
-ChatDatasetInstance = ChatDataset("./chat_data.json", Tokenizer)
-DatasetLoader = DataLoader(ChatDatasetInstance, batch_size=64)
+chat_dataset = Dataset("./chat_data.json", tokenizer)
+data_loader = DataLoader(chat_dataset, batch_size=64)
 
-Model.train()
-Optimizer = Adam(Model.parameters(), lr=1e-3)
+optimizer = Adam(model.parameters(), lr=1e-3)
 
-print("Training .... ")
-TrainModel(DatasetLoader, Model, Optimizer)
+print("Training...")
+train_model(data_loader, model, optimizer)
 
 print("Infer from model: ")
 while True:
-    UserInput = input()
-    print(GenerateResponse(UserInput))
+    user_input = input()
+    print(generate_response(user_input))
