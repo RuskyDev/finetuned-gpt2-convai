@@ -4,6 +4,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.optim import Adam
 from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import get_linear_schedule_with_warmup
 import tqdm
 
 class ChatDataset(Dataset):
@@ -17,13 +18,14 @@ class ChatDataset(Dataset):
         
         conversations = []
         for item in data:
-            for dialog in item['dialog']:
-                conversations.append(dialog['text'])
+            if item['dataset'] in ["synthetic-romantic-characters", "synthetic-friendly-characters", "synthetic-fight-characters"]:
+                for conversation in item['conversations']:
+                    conversations.append(conversation['content'])
         
         formatted_conversations = [
             f"<startofstring> {conversations[i]} <bot>: {conversations[i + 1]} <endofstring>"
             for i in range(len(conversations) - 1)
-        ][:5000]
+        ][:5000]  # Limit to 5000 pairs for training
         
         return formatted_conversations
 
@@ -46,7 +48,7 @@ class ChatDataset(Dataset):
     def __getitem__(self, index):
         return self.encoded_data['input_ids'][index], self.encoded_data['attention_mask'][index]
 
-def train_model(data_loader, model, optimizer, num_epochs=12, start_epoch=0):
+def train_model(data_loader, model, optimizer, scheduler, num_epochs=12, start_epoch=0):
     model.train()
     best_loss = float('inf')
     
@@ -59,6 +61,7 @@ def train_model(data_loader, model, optimizer, num_epochs=12, start_epoch=0):
                 loss = model(input_ids, attention_mask=attention_mask, labels=input_ids).loss
                 loss.backward()
                 optimizer.step()
+                scheduler.step()  # Step the scheduler
                 epoch_loss += loss.item()
             
             avg_loss = epoch_loss / len(data_loader)
@@ -67,7 +70,7 @@ def train_model(data_loader, model, optimizer, num_epochs=12, start_epoch=0):
 
             if avg_loss < best_loss:
                 best_loss = avg_loss
-                torch.save(model.state_dict(), "model_best.pt")
+                torch.save(model.state_dict(), "best_model.pt")
                 print(f"Model improved and saved as best_model.pt")
 
             torch.save({
@@ -85,11 +88,12 @@ def generate_response(user_input):
     generated_output = model.generate(input_ids, attention_mask=attention_mask, max_length=100)
     return tokenizer.decode(generated_output[0], skip_special_tokens=True)
 
+# Set device and load tokenizer and model
 device = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 tokenizer.add_special_tokens({
-    "pad_token": "<pad>",
+ "pad_token": "<pad>",
     "bos_token": "<startofstring>",
     "eos_token": "<endofstring>"
 })
@@ -99,12 +103,15 @@ model = GPT2LMHeadModel.from_pretrained("gpt2")
 model.resize_token_embeddings(len(tokenizer))
 model.to(device)
 
-chat_dataset = ChatDataset("./chat_data.json", tokenizer)
+# Load dataset and create data loader
+chat_dataset = ChatDataset("./dataset.json", tokenizer)
 data_loader = DataLoader(chat_dataset, batch_size=64)
 
+# Load optimizer and scheduler
 optimizer = Adam(model.parameters(), lr=1e-5)
+scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=100, num_training_steps=1000)
 
-checkpoint_path = "model_latest.pt"
+checkpoint_path = "model_state_epoch_latest.pt"
 if os.path.exists(checkpoint_path):
     checkpoint = torch.load(checkpoint_path)
     model.load_state_dict(checkpoint['model_state_dict'])
@@ -115,7 +122,7 @@ else:
     start_epoch = 0
 
 print("Training...")
-train_model(data_loader, model, optimizer, start_epoch=start_epoch)
+train_model(data_loader, model, optimizer, scheduler, start_epoch=start_epoch)
 
 print("Infer from model: ")
 while True:
